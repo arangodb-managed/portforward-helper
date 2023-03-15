@@ -52,6 +52,10 @@ func getNewStreamHandler(streams chan httpstream.Stream) func(httpstream.Stream,
 	}
 }
 
+type dataForwarder interface {
+	CopyToStream(stream httpstream.Stream) error
+}
+
 // httpStreamHandler is capable of processing multiple port forward
 // requests over a single httpstream.Connection.
 type httpStreamHandler struct {
@@ -61,7 +65,7 @@ type httpStreamHandler struct {
 	streamPairsLock       sync.RWMutex
 	streamPairs           map[string]*httpStreamPair
 	streamCreationTimeout time.Duration
-	dataForwarder         PortForwarderClient
+	dataForwarder         dataForwarder
 }
 
 func (h *httpStreamHandler) handleStreamingError(err error) {
@@ -175,7 +179,7 @@ func (h *httpStreamHandler) portForward(p *httpStreamPair) {
 
 	}()
 
-	err := h.dataForwarder.ForwardData(p.dataStream)
+	err := h.dataForwarder.CopyToStream(p.dataStream)
 	if err != nil {
 		h.handleStreamingError(err)
 	}

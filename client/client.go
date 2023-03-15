@@ -36,16 +36,23 @@ import (
 	"github.com/arangodb-managed/portforward-helper/httpstream"
 )
 
+// Config specifies the configuration for PortForwarderClient
 type Config struct {
-	DialEndpoint *url.URL // e.g. https://<public-ip>:12345/tunnel
-	DialMethod   string   // e.g. POST
-	LocalPort    int
+	// DialEndpoint must contain an HTTP URL which will be used for connection upgrade
+	// e.g. https://<public-ip>:12345/tunnel
+	DialEndpoint string
+	// DialMethod must contain an HTTP method to be used for request, e.g. POST
+	DialMethod string
+	// LocalPort is the port at localhost which will receive the data stream from remote service
+	LocalPort int
 }
 
+// PortForwarderClient allows the remote service to bypass the client firewall by using long-running connection
 type PortForwarderClient interface {
+	// Open initiates the connection to remote service
 	Open(ctx context.Context)
-	ForwardData(stream httpstream.Stream) error
-	Close()
+	// Close terminates the connection
+	Close() error
 }
 
 // portForwardClientImpl knows how to listen for local connections and forward them to
@@ -60,80 +67,89 @@ type portForwardClientImpl struct {
 	streamConn httpstream.Connection
 }
 
+// New creates PortForwarderClient
 func New(log zerolog.Logger, cfg *Config) (PortForwarderClient, error) {
-	tun := &portForwardClientImpl{
+	dialEndpoint, err := url.Parse(cfg.DialEndpoint)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse DialEndpoint URL: %s", err)
+	}
+	if cfg.DialMethod == "" {
+		return nil, fmt.Errorf("empty DialMethod")
+	}
+	c := &portForwardClientImpl{
 		log:       log,
 		stopChan:  make(chan struct{}, 1),
 		localPort: cfg.LocalPort,
 		streams:   make(chan httpstream.Stream, 1),
 	}
-	transport, upgrader, err := rt.RoundTripperFor(log, getNewStreamHandler(tun.streams))
+	transport, upgrader, err := rt.RoundTripperFor(log, getNewStreamHandler(c.streams))
 	if err != nil {
 		return nil, err
 	}
-	tun.dialer = rt.NewDialer(upgrader, &http.Client{Transport: transport}, cfg.DialMethod, cfg.DialEndpoint)
+	c.dialer = rt.NewDialer(upgrader, &http.Client{Transport: transport}, cfg.DialMethod, dialEndpoint)
 
-	return tun, nil
+	return c, nil
 }
 
-func (t *portForwardClientImpl) Open(ctx context.Context) {
+func (c *portForwardClientImpl) Open(ctx context.Context) {
 	go func() {
 		<-ctx.Done()
-		t.Close()
+		c.Close()
 	}()
 
 	// TODO: add restore connection logic if needed
 
-	err := t.connectToRemote()
+	err := c.connectToRemote()
 	if err != nil {
-		t.log.Debug().Err(err).Msg("Port forward finished or errored")
+		c.log.Debug().Err(err).Msg("Port forward finished or errored")
 	}
 }
 
-func (t *portForwardClientImpl) Close() {
+func (c *portForwardClientImpl) Close() error {
 	// TODO:
-	t.stopChan <- struct{}{}
-	if t.streamConn != nil {
-		t.streamConn.Close()
+	c.stopChan <- struct{}{}
+	if c.streamConn != nil {
+		return c.streamConn.Close()
 	}
+	return nil
 }
 
 // connectToRemote formats and executes a port forwarding request. The connection will remain
 // open until stopChan is closed.
-func (t *portForwardClientImpl) connectToRemote() error {
+func (c *portForwardClientImpl) connectToRemote() error {
 	var err error
-	t.streamConn, _, err = t.dialer.Dial(api.ProtocolName)
+	c.streamConn, _, err = c.dialer.Dial(api.ProtocolName)
 	if err != nil {
 		return fmt.Errorf("error upgrading connection: %s", err)
 	}
 	defer func() {
-		t.streamConn.Close()
-		t.streamConn = nil
+		c.streamConn.Close()
+		c.streamConn = nil
 	}()
 
 	const streamCreationTimeout = 30 * time.Second
 
 	h := &httpStreamHandler{
-		log:                   t.log,
-		conn:                  t.streamConn,
-		streamChan:            t.streams,
+		log:                   c.log,
+		conn:                  c.streamConn,
+		streamChan:            c.streams,
 		streamPairs:           make(map[string]*httpStreamPair),
 		streamCreationTimeout: streamCreationTimeout,
-		dataForwarder:         t,
+		dataForwarder:         c,
 	}
 	h.run() // todo: pass ctx?
 	return nil
 }
 
-func (t *portForwardClientImpl) ForwardData(stream httpstream.Stream) error {
+func (c *portForwardClientImpl) CopyToStream(stream httpstream.Stream) error {
 	ctx := context.TODO() // TODO:
 	defer stream.Close()
 	// TODO: hardcoded to tcp4 because localhost resolves to ::1 by default if the system has IPv6 enabled.
 	// Theoretically happy eyeballs will try IPv6 first and fallback to IPv4
 	// but resolving localhost doesn't seem to return and IPv4 address, thus failing the connection.
-	conn, err := net.Dial("tcp4", fmt.Sprintf("127.0.0.1:%d", t.localPort))
+	conn, err := net.Dial("tcp4", fmt.Sprintf("127.0.0.1:%d", c.localPort))
 	if err != nil {
-		err = fmt.Errorf("failed to dial %d: %s", t.localPort, err.Error())
+		err = fmt.Errorf("failed to dial %d: %s", c.localPort, err.Error())
 		return err
 	}
 	defer conn.Close()
@@ -141,14 +157,14 @@ func (t *portForwardClientImpl) ForwardData(stream httpstream.Stream) error {
 	errCh := make(chan error, 2)
 	// Copy from the local port connection to the client stream
 	go func() {
-		t.log.Debug().Msgf("PortForward copying data to the client stream")
+		c.log.Debug().Msgf("PortForward copying data to the client stream")
 		_, err := io.Copy(stream, conn)
 		errCh <- err
 	}()
 
 	// Copy from the client stream to the port connection
 	go func() {
-		t.log.Debug().Msg("PortForward copying data from client stream to local port")
+		c.log.Debug().Msg("PortForward copying data from client stream to local port")
 		_, err := io.Copy(conn, stream)
 		errCh <- err
 	}()
@@ -159,9 +175,9 @@ func (t *portForwardClientImpl) ForwardData(stream httpstream.Stream) error {
 	var errFwd error
 	select {
 	case errFwd = <-errCh:
-		t.log.Debug().Err(err).Msg("PortForward stopped (one direction)")
+		c.log.Debug().Err(err).Msg("PortForward stopped (one direction)")
 	case <-ctx.Done():
-		t.log.Debug().Err(err).Msg("PortForward cancelled (one direction)")
+		c.log.Debug().Err(err).Msg("PortForward cancelled (one direction)")
 		return ctx.Err()
 	}
 	// give a chance to terminate gracefully or timeout
@@ -173,11 +189,11 @@ func (t *portForwardClientImpl) ForwardData(stream httpstream.Stream) error {
 		if errFwd == nil {
 			errFwd = e
 		}
-		t.log.Debug().Err(err).Msg("PortForward stopped forwarding in both directions")
+		c.log.Debug().Err(err).Msg("PortForward stopped forwarding in both directions")
 	case <-time.After(timeout):
-		t.log.Debug().Msg("PortForward timed out waiting to close the connection")
+		c.log.Debug().Msg("PortForward timed out waiting to close the connection")
 	case <-ctx.Done():
-		t.log.Debug().Err(err).Msg("PortForward cancelled")
+		c.log.Debug().Err(err).Msg("PortForward cancelled")
 		errFwd = ctx.Err()
 	}
 
