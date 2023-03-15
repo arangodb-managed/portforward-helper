@@ -1,0 +1,163 @@
+package client
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"log"
+	"net"
+	"net/http"
+	"net/url"
+	"time"
+
+	"github.com/rs/zerolog"
+
+	"github.com/arangodb-managed/portforward-helper/api"
+	"github.com/arangodb-managed/portforward-helper/client/internal/rt"
+	"github.com/arangodb-managed/portforward-helper/httpstream"
+)
+
+type Config struct {
+	DialEndpoint *url.URL // e.g. https://<public-ip>:12345/tunnel
+	DialMethod   string   // e.g. POST
+	LocalPort    int
+}
+
+type PortForwarderClient interface {
+	Open(ctx context.Context)
+	ForwardData(stream httpstream.Stream) error
+	Close()
+}
+
+// portForwardClientImpl knows how to listen for local connections and forward them to
+// a remote host via an upgraded HTTP request.
+type portForwardClientImpl struct {
+	stopChan chan struct{}
+	streams  chan httpstream.Stream
+
+	localPort  int
+	dialer     httpstream.Dialer
+	streamConn httpstream.Connection
+}
+
+func New(log zerolog.Logger, cfg *Config) (PortForwarderClient, error) {
+	tun := &portForwardClientImpl{
+		stopChan:  make(chan struct{}, 1),
+		localPort: cfg.LocalPort,
+		streams:   make(chan httpstream.Stream, 1),
+	}
+	transport, upgrader, err := rt.RoundTripperFor(log, getNewStreamHandler(tun.streams))
+	if err != nil {
+		return nil, err
+	}
+	tun.dialer = rt.NewDialer(upgrader, &http.Client{Transport: transport}, cfg.DialMethod, cfg.DialEndpoint)
+
+	return tun, nil
+}
+
+func (t *portForwardClientImpl) Open(ctx context.Context) {
+	go func() {
+		<-ctx.Done()
+		t.Close()
+	}()
+
+	// TODO: add restore connection logic if needed
+
+	err := t.connectToRemote()
+	if err != nil {
+		log.Printf("port forward finished or errored: %s\n", err.Error())
+	}
+}
+
+func (t *portForwardClientImpl) Close() {
+	// TODO:
+	t.stopChan <- struct{}{}
+	if t.streamConn != nil {
+		t.streamConn.Close()
+	}
+}
+
+// connectToRemote formats and executes a port forwarding request. The connection will remain
+// open until stopChan is closed.
+func (t *portForwardClientImpl) connectToRemote() error {
+	var err error
+	t.streamConn, _, err = t.dialer.Dial(api.ProtocolName)
+	if err != nil {
+		return fmt.Errorf("error upgrading connection: %s", err)
+	}
+	defer func() {
+		t.streamConn.Close()
+		t.streamConn = nil
+	}()
+
+	const streamCreationTimeout = 30 * time.Second
+
+	h := &httpStreamHandler{
+		conn:                  t.streamConn,
+		streamChan:            t.streams,
+		streamPairs:           make(map[string]*httpStreamPair),
+		streamCreationTimeout: streamCreationTimeout,
+		dataForwarder:         t,
+	}
+	h.run() // todo: pass ctx?
+	return nil
+}
+
+func (t *portForwardClientImpl) ForwardData(stream httpstream.Stream) error {
+	ctx := context.TODO() // TODO:
+	defer stream.Close()
+	// TODO: hardcoded to tcp4 because localhost resolves to ::1 by default if the system has IPv6 enabled.
+	// Theoretically happy eyeballs will try IPv6 first and fallback to IPv4
+	// but resolving localhost doesn't seem to return and IPv4 address, thus failing the connection.
+	conn, err := net.Dial("tcp4", fmt.Sprintf("127.0.0.1:%d", t.localPort))
+	if err != nil {
+		err = fmt.Errorf("failed to dial %d: %s", t.localPort, err.Error())
+		return err
+	}
+	defer conn.Close()
+
+	errCh := make(chan error, 2)
+	// Copy from the local port connection to the client stream
+	go func() {
+		log.Printf("PortForward copying data from port %d to the client stream\n", t.localPort)
+		_, err := io.Copy(stream, conn)
+		errCh <- err
+	}()
+
+	// Copy from the client stream to the port connection
+	go func() {
+		log.Printf("PortForward copying data from client stream to port %d\n", t.localPort)
+		_, err := io.Copy(conn, stream)
+		errCh <- err
+	}()
+
+	// Wait until the first error is returned by one of the connections
+	// we use errFwd to store the result of the port forwarding operation
+	// if the context is cancelled close everything and return
+	var errFwd error
+	select {
+	case errFwd = <-errCh:
+		log.Printf("PortForward stop forwarding in one direction in network port %d: %v\n", t.localPort, errFwd)
+	case <-ctx.Done():
+		log.Printf("PortForward cancelled in network port %d: %v\n", t.localPort, ctx.Err())
+		return ctx.Err()
+	}
+	// give a chance to terminate gracefully or timeout
+	// 0.5s is the default timeout used in socat
+	// https://linux.die.net/man/1/socat
+	timeout := time.Duration(500) * time.Millisecond
+	select {
+	case e := <-errCh:
+		if errFwd == nil {
+			errFwd = e
+		}
+		log.Printf("PortForward stopped forwarding in both directions in network port %d: %v\n", t.localPort, e)
+	case <-time.After(timeout):
+		log.Printf("PortForward timed out waiting to close the connection in network port %d\n", t.localPort)
+	case <-ctx.Done():
+		log.Printf("PortForward cancelled in network port %d: %v\n", t.localPort, ctx.Err())
+		errFwd = ctx.Err()
+	}
+
+	return errFwd
+}
