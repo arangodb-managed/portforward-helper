@@ -30,6 +30,7 @@ import (
 	"net/url"
 	"testing"
 
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -60,7 +61,7 @@ func serverHandler(t *testing.T, config serverHandlerConfig) http.HandlerFunc {
 
 		streamCh := make(chan httpstream.Stream)
 
-		responseUpgrader := NewResponseUpgrader()
+		responseUpgrader := NewResponseUpgrader(zerolog.New(zerolog.NewTestWriter(t)))
 		spdyConn := responseUpgrader.UpgradeResponse(w, req, func(s httpstream.Stream, replySent <-chan struct{}) error {
 			streamCh <- s
 			return nil

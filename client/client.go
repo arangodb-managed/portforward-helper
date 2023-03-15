@@ -24,7 +24,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -52,6 +51,7 @@ type PortForwarderClient interface {
 // portForwardClientImpl knows how to listen for local connections and forward them to
 // a remote host via an upgraded HTTP request.
 type portForwardClientImpl struct {
+	log      zerolog.Logger
 	stopChan chan struct{}
 	streams  chan httpstream.Stream
 
@@ -62,6 +62,7 @@ type portForwardClientImpl struct {
 
 func New(log zerolog.Logger, cfg *Config) (PortForwarderClient, error) {
 	tun := &portForwardClientImpl{
+		log:       log,
 		stopChan:  make(chan struct{}, 1),
 		localPort: cfg.LocalPort,
 		streams:   make(chan httpstream.Stream, 1),
@@ -85,7 +86,7 @@ func (t *portForwardClientImpl) Open(ctx context.Context) {
 
 	err := t.connectToRemote()
 	if err != nil {
-		log.Printf("port forward finished or errored: %s\n", err.Error())
+		t.log.Debug().Err(err).Msg("Port forward finished or errored")
 	}
 }
 
@@ -113,6 +114,7 @@ func (t *portForwardClientImpl) connectToRemote() error {
 	const streamCreationTimeout = 30 * time.Second
 
 	h := &httpStreamHandler{
+		log:                   t.log,
 		conn:                  t.streamConn,
 		streamChan:            t.streams,
 		streamPairs:           make(map[string]*httpStreamPair),
@@ -139,14 +141,14 @@ func (t *portForwardClientImpl) ForwardData(stream httpstream.Stream) error {
 	errCh := make(chan error, 2)
 	// Copy from the local port connection to the client stream
 	go func() {
-		log.Printf("PortForward copying data from port %d to the client stream\n", t.localPort)
+		t.log.Debug().Msgf("PortForward copying data to the client stream")
 		_, err := io.Copy(stream, conn)
 		errCh <- err
 	}()
 
 	// Copy from the client stream to the port connection
 	go func() {
-		log.Printf("PortForward copying data from client stream to port %d\n", t.localPort)
+		t.log.Debug().Msg("PortForward copying data from client stream to local port")
 		_, err := io.Copy(conn, stream)
 		errCh <- err
 	}()
@@ -157,9 +159,9 @@ func (t *portForwardClientImpl) ForwardData(stream httpstream.Stream) error {
 	var errFwd error
 	select {
 	case errFwd = <-errCh:
-		log.Printf("PortForward stop forwarding in one direction in network port %d: %v\n", t.localPort, errFwd)
+		t.log.Debug().Err(err).Msg("PortForward stopped (one direction)")
 	case <-ctx.Done():
-		log.Printf("PortForward cancelled in network port %d: %v\n", t.localPort, ctx.Err())
+		t.log.Debug().Err(err).Msg("PortForward cancelled (one direction)")
 		return ctx.Err()
 	}
 	// give a chance to terminate gracefully or timeout
@@ -171,11 +173,11 @@ func (t *portForwardClientImpl) ForwardData(stream httpstream.Stream) error {
 		if errFwd == nil {
 			errFwd = e
 		}
-		log.Printf("PortForward stopped forwarding in both directions in network port %d: %v\n", t.localPort, e)
+		t.log.Debug().Err(err).Msg("PortForward stopped forwarding in both directions")
 	case <-time.After(timeout):
-		log.Printf("PortForward timed out waiting to close the connection in network port %d\n", t.localPort)
+		t.log.Debug().Msg("PortForward timed out waiting to close the connection")
 	case <-ctx.Done():
-		log.Printf("PortForward cancelled in network port %d: %v\n", t.localPort, ctx.Err())
+		t.log.Debug().Err(err).Msg("PortForward cancelled")
 		errFwd = ctx.Err()
 	}
 

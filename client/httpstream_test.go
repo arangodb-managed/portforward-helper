@@ -25,6 +25,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rs/zerolog"
+
 	"github.com/arangodb-managed/portforward-helper/api"
 	"github.com/arangodb-managed/portforward-helper/httpstream"
 )
@@ -104,6 +106,7 @@ func TestGetStreamPair(t *testing.T) {
 
 	conn := &fakeConn{}
 	h := &httpStreamHandler{
+		log:         zerolog.New(zerolog.NewTestWriter(t)),
 		streamPairs: make(map[string]*httpStreamPair),
 		conn:        conn,
 	}

@@ -24,6 +24,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/rs/zerolog"
 )
 
 func TestUpgradeResponse(t *testing.T) {
@@ -56,7 +58,7 @@ func TestUpgradeResponse(t *testing.T) {
 
 	for i, testCase := range testCases {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-			upgrader := NewResponseUpgrader()
+			upgrader := NewResponseUpgrader(zerolog.New(zerolog.NewTestWriter(t)))
 			conn := upgrader.UpgradeResponse(w, req, nil)
 			haveErr := conn == nil
 			if e, a := testCase.shouldError, haveErr; e != a {

@@ -21,13 +21,13 @@
 package client
 
 import (
-	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"sync"
 	"time"
+
+	"github.com/rs/zerolog"
 
 	"github.com/arangodb-managed/portforward-helper/api"
 	"github.com/arangodb-managed/portforward-helper/httpstream"
@@ -55,12 +55,17 @@ func getNewStreamHandler(streams chan httpstream.Stream) func(httpstream.Stream,
 // httpStreamHandler is capable of processing multiple port forward
 // requests over a single httpstream.Connection.
 type httpStreamHandler struct {
+	log                   zerolog.Logger
 	conn                  httpstream.Connection
 	streamChan            chan httpstream.Stream
 	streamPairsLock       sync.RWMutex
 	streamPairs           map[string]*httpStreamPair
 	streamCreationTimeout time.Duration
 	dataForwarder         PortForwarderClient
+}
+
+func (h *httpStreamHandler) handleStreamingError(err error) {
+	h.log.Info().Err(err).Msg("streaming error")
 }
 
 // getStreamPair returns a httpStreamPair for requestID. This creates a
@@ -71,11 +76,11 @@ func (h *httpStreamHandler) getStreamPair(requestID string) (*httpStreamPair, bo
 	defer h.streamPairsLock.Unlock()
 
 	if p, ok := h.streamPairs[requestID]; ok {
-		log.Printf("Connection request found existing stream pair requestID=%s\n", requestID)
+		h.log.Debug().Str("request_id", requestID).Msg("Connection request found existing stream pair")
 		return p, false
 	}
 
-	log.Printf("Connection request request creating new stream pair requestID=%s\n", requestID)
+	h.log.Debug().Str("request_id", requestID).Msg("Connection request request creating new stream pair")
 
 	p := newPortForwardPair(requestID)
 	h.streamPairs[requestID] = p
@@ -90,10 +95,10 @@ func (h *httpStreamHandler) monitorStreamPair(p *httpStreamPair, timeout <-chan 
 	select {
 	case <-timeout:
 		err := fmt.Errorf("(conn=%v, request=%s) timed out waiting for streams", h.conn, p.requestID)
-		api.HandleError(err)
+		h.handleStreamingError(err)
 		p.printError(err.Error())
 	case <-p.complete:
-		log.Printf("Connection request successfully received error and data streams requestID=%s\n", p.requestID)
+		h.log.Debug().Str("request_id", p.requestID).Msg("Connection request successfully received error and data streams")
 	}
 	h.removeStreamPair(p.requestID)
 }
@@ -124,26 +129,29 @@ func (h *httpStreamHandler) removeStreamPair(requestID string) {
 // streams, invoking portForward for each complete stream pair. The loop exits
 // when the httpstream.Connection is closed.
 func (h *httpStreamHandler) run() {
-	log.Printf("Connection waiting for port forward streams\n")
+	h.log.Debug().Msg("Connection waiting for port forward streams")
 Loop:
 	for {
 		select {
 		case <-h.conn.CloseChan():
-			log.Printf("Connection upgraded connection closed\n")
+			h.log.Debug().Msg("Connection upgraded connection closed")
 			break Loop
 		case stream := <-h.streamChan:
 			requestID := stream.Headers().Get(api.HeaderRequestID)
 			streamType := stream.Headers().Get(api.HeaderStreamType)
-			log.Printf("Connection request received new type of stream request %s streamType %s\n", requestID, streamType)
+			h.log.Debug().
+				Str("request_id", requestID).
+				Str("stream_type", streamType).
+				Msg("Connection request received")
 
 			p, created := h.getStreamPair(requestID)
 			if created {
 				go h.monitorStreamPair(p, time.After(h.streamCreationTimeout))
 			}
 			if complete, err := p.add(stream); err != nil {
-				msg := fmt.Sprintf("error processing stream for request %s: %v", requestID, err)
-				api.HandleError(errors.New(msg))
-				p.printError(msg)
+				err = fmt.Errorf("error processing stream for request %s: %v", requestID, err)
+				h.handleStreamingError(err)
+				p.printError(err.Error())
 			} else if complete {
 				go h.portForward(p)
 			}
@@ -169,6 +177,6 @@ func (h *httpStreamHandler) portForward(p *httpStreamPair) {
 
 	err := h.dataForwarder.ForwardData(p.dataStream)
 	if err != nil {
-		api.HandleError(err)
+		h.handleStreamingError(err)
 	}
 }

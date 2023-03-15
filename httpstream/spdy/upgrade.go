@@ -30,7 +30,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/arangodb-managed/portforward-helper/api"
+	"github.com/rs/zerolog"
+
 	"github.com/arangodb-managed/portforward-helper/httpstream"
 )
 
@@ -40,6 +41,7 @@ const HeaderSpdy31 = "SPDY/3.1"
 // implements the httpstream.ResponseUpgrader interface.
 type responseUpgrader struct {
 	pingPeriod time.Duration
+	log        zerolog.Logger
 }
 
 // connWrapper is used to wrap a hijacked connection and its bufio.Reader. All
@@ -69,8 +71,8 @@ func (w *connWrapper) Close() error {
 // NewResponseUpgrader returns a new httpstream.ResponseUpgrader that is
 // capable of upgrading HTTP responses using SPDY/3.1 via the
 // spdystream package.
-func NewResponseUpgrader() httpstream.ResponseUpgrader {
-	return NewResponseUpgraderWithPings(0)
+func NewResponseUpgrader(log zerolog.Logger) httpstream.ResponseUpgrader {
+	return NewResponseUpgraderWithPings(log, 0)
 }
 
 // NewResponseUpgraderWithPings returns a new httpstream.ResponseUpgrader that
@@ -80,8 +82,8 @@ func NewResponseUpgrader() httpstream.ResponseUpgrader {
 // If pingPeriod is non-zero, for each incoming connection a background
 // goroutine will send periodic Ping frames to the server. Use this to keep
 // idle connections through certain load balancers alive longer.
-func NewResponseUpgraderWithPings(pingPeriod time.Duration) httpstream.ResponseUpgrader {
-	return responseUpgrader{pingPeriod: pingPeriod}
+func NewResponseUpgraderWithPings(log zerolog.Logger, pingPeriod time.Duration) httpstream.ResponseUpgrader {
+	return responseUpgrader{log: log, pingPeriod: pingPeriod}
 }
 
 // UpgradeResponse upgrades an HTTP response to one that supports multiplexed
@@ -109,14 +111,14 @@ func (u responseUpgrader) UpgradeResponse(w http.ResponseWriter, req *http.Reque
 
 	conn, bufrw, err := hijacker.Hijack()
 	if err != nil {
-		api.HandleError(fmt.Errorf("unable to upgrade: error hijacking response: %v", err))
+		u.log.Info().Err(err).Msg("Unable to upgrade: error hijacking response")
 		return nil
 	}
 
 	connWithBuf := &connWrapper{Conn: conn, bufReader: bufrw.Reader}
 	spdyConn, err := NewServerConnectionWithPings(connWithBuf, newStreamHandler, u.pingPeriod)
 	if err != nil {
-		api.HandleError(fmt.Errorf("unable to upgrade: error creating SPDY server connection: %v", err))
+		u.log.Info().Err(err).Msg("Unable to upgrade: error creating SPDY server connection")
 		return nil
 	}
 

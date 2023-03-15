@@ -20,8 +20,6 @@
 
 package api
 
-import "log"
-
 const (
 	// HeaderRequestID is the name of header that specifies a request ID used to associate the error
 	// and data streams for a single forwarded connection
@@ -36,7 +34,3 @@ const (
 
 // ProtocolName is the subprotocol used for port forwarding.
 const ProtocolName = "PortForwarding-v1"
-
-func HandleError(err error) {
-	log.Printf("Got another err %s\n", err.Error())
-}
