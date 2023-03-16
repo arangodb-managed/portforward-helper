@@ -332,7 +332,6 @@ func TestRoundTripAndNewConnection(t *testing.T) {
 			var proxyCalledWithHost string
 			var proxyCalledWithAuth bool
 			var proxyCalledWithAuthHeader string
-			// TODO: commented due to broken dependency. Tests are expected to fail.
 			if testCase.proxyServerFunc != nil {
 				proxyHandler := nettesting.NewHTTPProxyHandler(t, func(req *http.Request) bool {
 					proxyCalledWithHost = req.Host

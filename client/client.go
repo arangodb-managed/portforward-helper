@@ -43,8 +43,11 @@ type Config struct {
 	DialEndpoint string
 	// DialMethod must contain an HTTP method to be used for request, e.g. POST
 	DialMethod string
-	// LocalPort is the port at localhost which will receive the data stream from remote service
-	LocalPort int
+	// ForwardAddr is an address which will receive the data stream from remote service
+	// 127.0.0.1 if not specified
+	ForwardAddr string
+	// ForwardPort is the number of port which will receive the data stream from remote service
+	ForwardPort int
 }
 
 // PortForwarderClient allows the remote service to bypass the client firewall by using long-running connection
@@ -55,16 +58,15 @@ type PortForwarderClient interface {
 	Close() error
 }
 
-// portForwardClientImpl knows how to listen for local connections and forward them to
-// a remote host via an upgraded HTTP request.
 type portForwardClientImpl struct {
 	log      zerolog.Logger
 	stopChan chan struct{}
 	streams  chan httpstream.Stream
 
-	localPort  int
-	dialer     httpstream.Dialer
-	streamConn httpstream.Connection
+	forwardAddr string
+	forwardPort int
+	dialer      httpstream.Dialer
+	streamConn  httpstream.Connection
 }
 
 // New creates PortForwarderClient
@@ -76,11 +78,18 @@ func New(log zerolog.Logger, cfg *Config) (PortForwarderClient, error) {
 	if cfg.DialMethod == "" {
 		return nil, fmt.Errorf("empty DialMethod")
 	}
+	if cfg.ForwardPort < 1 {
+		return nil, fmt.Errorf("invalid ForwardPort")
+	}
+	if cfg.ForwardAddr == "" {
+		cfg.ForwardAddr = "127.0.0.1"
+	}
 	c := &portForwardClientImpl{
-		log:       log,
-		stopChan:  make(chan struct{}, 1),
-		localPort: cfg.LocalPort,
-		streams:   make(chan httpstream.Stream, 1),
+		log:         log,
+		stopChan:    make(chan struct{}, 1),
+		forwardAddr: cfg.ForwardAddr,
+		forwardPort: cfg.ForwardPort,
+		streams:     make(chan httpstream.Stream, 1),
 	}
 	transport, upgrader, err := rt.RoundTripperFor(log, getNewStreamHandler(c.streams))
 	if err != nil {
@@ -92,21 +101,13 @@ func New(log zerolog.Logger, cfg *Config) (PortForwarderClient, error) {
 }
 
 func (c *portForwardClientImpl) Open(ctx context.Context) {
-	go func() {
-		<-ctx.Done()
-		c.Close()
-	}()
-
-	// TODO: add restore connection logic if needed
-
-	err := c.connectToRemote()
+	err := c.connectToRemote(ctx)
 	if err != nil {
 		c.log.Debug().Err(err).Msg("Port forward finished or errored")
 	}
 }
 
 func (c *portForwardClientImpl) Close() error {
-	// TODO:
 	c.stopChan <- struct{}{}
 	if c.streamConn != nil {
 		return c.streamConn.Close()
@@ -116,7 +117,7 @@ func (c *portForwardClientImpl) Close() error {
 
 // connectToRemote formats and executes a port forwarding request. The connection will remain
 // open until stopChan is closed.
-func (c *portForwardClientImpl) connectToRemote() error {
+func (c *portForwardClientImpl) connectToRemote(ctx context.Context) error {
 	var err error
 	c.streamConn, _, err = c.dialer.Dial(api.ProtocolName)
 	if err != nil {
@@ -137,25 +138,21 @@ func (c *portForwardClientImpl) connectToRemote() error {
 		streamCreationTimeout: streamCreationTimeout,
 		dataForwarder:         c,
 	}
-	h.run() // todo: pass ctx?
+	h.run(ctx)
 	return nil
 }
 
-func (c *portForwardClientImpl) CopyToStream(stream httpstream.Stream) error {
-	ctx := context.TODO() // TODO:
+func (c *portForwardClientImpl) CopyToStream(ctx context.Context, stream httpstream.Stream) error {
 	defer stream.Close()
-	// TODO: hardcoded to tcp4 because localhost resolves to ::1 by default if the system has IPv6 enabled.
-	// Theoretically happy eyeballs will try IPv6 first and fallback to IPv4
-	// but resolving localhost doesn't seem to return and IPv4 address, thus failing the connection.
-	conn, err := net.Dial("tcp4", fmt.Sprintf("127.0.0.1:%d", c.localPort))
+	conn, err := net.Dial("tcp4", fmt.Sprintf("%s:%d", c.forwardAddr, c.forwardPort))
 	if err != nil {
-		err = fmt.Errorf("failed to dial %d: %s", c.localPort, err.Error())
+		err = fmt.Errorf("failed to dial %d: %s", c.forwardPort, err.Error())
 		return err
 	}
 	defer conn.Close()
 
 	errCh := make(chan error, 2)
-	// Copy from the local port connection to the client stream
+	// Copy from the forward port connection to the client stream
 	go func() {
 		c.log.Debug().Msgf("PortForward copying data to the client stream")
 		_, err := io.Copy(stream, conn)
@@ -164,7 +161,7 @@ func (c *portForwardClientImpl) CopyToStream(stream httpstream.Stream) error {
 
 	// Copy from the client stream to the port connection
 	go func() {
-		c.log.Debug().Msg("PortForward copying data from client stream to local port")
+		c.log.Debug().Msg("PortForward copying data from client stream to forward port")
 		_, err := io.Copy(conn, stream)
 		errCh <- err
 	}()

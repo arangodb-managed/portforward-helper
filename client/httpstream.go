@@ -21,6 +21,7 @@
 package client
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -53,7 +54,7 @@ func getNewStreamHandler(streams chan httpstream.Stream) func(httpstream.Stream,
 }
 
 type dataForwarder interface {
-	CopyToStream(stream httpstream.Stream) error
+	CopyToStream(ctx context.Context, stream httpstream.Stream) error
 }
 
 // httpStreamHandler is capable of processing multiple port forward
@@ -132,7 +133,7 @@ func (h *httpStreamHandler) removeStreamPair(requestID string) {
 // run is the main loop for the httpStreamHandler. It processes new
 // streams, invoking portForward for each complete stream pair. The loop exits
 // when the httpstream.Connection is closed.
-func (h *httpStreamHandler) run() {
+func (h *httpStreamHandler) run(ctx context.Context) {
 	h.log.Debug().Msg("Connection waiting for port forward streams")
 Loop:
 	for {
@@ -157,7 +158,7 @@ Loop:
 				h.handleStreamingError(err)
 				p.printError(err.Error())
 			} else if complete {
-				go h.portForward(p)
+				go h.portForward(ctx, p)
 			}
 		}
 	}
@@ -165,21 +166,17 @@ Loop:
 
 // portForward invokes the httpStreamHandler's forwarder.PortForward
 // function for the given stream pair.
-func (h *httpStreamHandler) portForward(p *httpStreamPair) {
-	defer p.errorStream.Close()
-
-	// TODO: probably not needed
+func (h *httpStreamHandler) portForward(ctx context.Context, p *httpStreamPair) {
 	// handle err stream
 	go func() {
 		defer p.errorStream.Close()
-		io.Copy(os.Stderr, p.errorStream)
+		_, err := io.Copy(os.Stderr, p.errorStream)
+		if err != nil {
+			h.handleStreamingError(err)
+		}
 	}()
 
-	go func() {
-
-	}()
-
-	err := h.dataForwarder.CopyToStream(p.dataStream)
+	err := h.dataForwarder.CopyToStream(ctx, p.dataStream)
 	if err != nil {
 		h.handleStreamingError(err)
 	}

@@ -52,7 +52,7 @@ type SpdyRoundTripper struct {
 	/* TODO according to http://golang.org/pkg/net/http/#RoundTripper, a RoundTripper
 	   must be safe for use by multiple concurrent goroutines. If this is absolutely
 	   necessary, we could keep a map from http.Request to net.Conn. In practice,
-	   a client will create an http.Client, set the transport to a new insteace of
+	   a client will create an http.Client, set the transport to a new instance of
 	   SpdyRoundTripper, and use it a single time, so this hopefully won't be an issue.
 	*/
 	// conn is the underlying network connection to the remote server.
@@ -95,7 +95,7 @@ func NewRoundTripperWithProxy(tlsConfig *tls.Config, proxier func(*http.Request)
 // configuration.
 func NewRoundTripperWithConfig(cfg RoundTripperConfig) *SpdyRoundTripper {
 	if cfg.Proxier == nil {
-		cfg.Proxier = http.ProxyFromEnvironment // TODO: probably can be removed - utilnet.NewProxierWithNoProxyCIDR(http.ProxyFromEnvironment)
+		cfg.Proxier = http.ProxyFromEnvironment
 	}
 	return &SpdyRoundTripper{
 		tlsConfig:        cfg.TLS,
@@ -205,7 +205,6 @@ func (s *SpdyRoundTripper) dialWithHttpProxy(req *http.Request, proxyURL *url.UR
 	return rwc, nil
 }
 
-// TODO: cleanup?
 // dialWithSocks5Proxy dials the host specified by url through a socks5 proxy.
 func (s *SpdyRoundTripper) dialWithSocks5Proxy(req *http.Request, proxyURL *url.URL) (net.Conn, error) {
 	// ensure we use a canonical host with proxyReq

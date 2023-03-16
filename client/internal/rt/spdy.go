@@ -41,31 +41,14 @@ type Upgrader interface {
 
 // RoundTripperFor returns a round tripper and Upgrader to use with SPDY.
 func RoundTripperFor(logger zerolog.Logger, newStreamHandler httpstream.NewStreamHandler) (http.RoundTripper, Upgrader, error) {
-	// TODO: cleanup
-	//tlsConfig, err := restclient.TLSConfigFor(config)
-	//if err != nil {
-	//	return nil, nil, err
-	//}
-
 	tlsConfig := &tls.Config{
 		// Can't use SSLv3 because of POODLE and BEAST
 		// Can't use TLSv1.0 because of POODLE and BEAST using CBC cipher
 		// Can't use TLSv1.1 because of RC4 cipher usage
-		MinVersion:         tls.VersionTLS12,
-		InsecureSkipVerify: true,
-		// ServerName:         c.TLS.ServerName,
-		// NextProtos: c.TLS.NextProtos, // ["h2", "http/1.1"]
+		MinVersion: tls.VersionTLS12,
 	}
-
-	proxy := http.ProxyFromEnvironment
-	// TODO: cleanup
-	//if config.Proxy != nil {
-	//	proxy = config.Proxy
-	//}
-
 	upgradeRoundTripper := spdy.NewRoundTripperWithConfig(spdy.RoundTripperConfig{
 		TLS:              tlsConfig,
-		Proxier:          proxy,
 		PingPeriod:       time.Second * 5,
 		NewStreamHandler: newStreamHandler,
 	})
