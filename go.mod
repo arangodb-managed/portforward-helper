@@ -126,3 +126,5 @@ replace k8s.io/sample-apiserver => k8s.io/sample-apiserver v0.24.11
 replace sigs.k8s.io/controller-runtime => sigs.k8s.io/controller-runtime v0.12.3
 
 replace sourcegraph.com/sourcegraph/go-diff => github.com/sourcegraph/go-diff v0.5.2
+
+replace helm.sh/helm/v3 => helm.sh/helm/v3 v3.9.4

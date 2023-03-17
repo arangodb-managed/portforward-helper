@@ -2,7 +2,7 @@
 
 Port forward helper for ArangoGraph Insights Platform.
 
-Provides the implementation of HTTP streaming to allow port-forwarding
+Provides the implementation of HTTP(S) streaming to allow port-forwarding
 from firewalled server to the Platform.
 
 ### Credits

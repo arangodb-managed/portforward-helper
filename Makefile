@@ -27,14 +27,4 @@ update-modules:
 	test -f go.mod || go mod init
 	go mod edit \
 		$(shell zutano go mod replacements)
-	go get \
-		$(shell zutano go mod latest \
-			github.com/arangodb-managed/apis \
-			github.com/arangodb-managed/apis-helper \
-			github.com/arangodb-managed/arangodb-helper \
-			github.com/arangodb-managed/internal-apis \
-			github.com/arangodb-managed/log-helper \
-			github.com/arangodb-managed/metrics-helper \
-			github.com/arangodb-managed/refs-helper \
-			)
 	go mod tidy
