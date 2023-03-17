@@ -1,0 +1,56 @@
+executors:
+  go-executor:
+    docker:
+      - image: arangodboasis/golang-ci:latest
+jobs:
+  build:
+    executor: go-executor
+    parameters:
+      update_modules:
+        default: false
+        type: boolean
+    steps:
+      - checkout
+      - setup_remote_docker
+      - run: cp go.sum go.sum.orig
+      - restore_cache:
+          keys:
+            - go-mod-v1-{{ checksum "go.sum.orig" }}
+      - when:
+          condition: <<parameters.update_modules>>
+          steps:
+            - run: |
+                make update-modules
+      - run: |
+          make all
+      - save_cache:
+          key: go-mod-v1-{{ checksum "go.sum.orig" }}
+          paths:
+            - /go/pkg/mod
+      - run: |
+          make test
+      - store_artifacts:
+          path: .tmp/coverage.html
+      - slack/notify:
+          event: fail
+          template: basic_fail_1
+orbs:
+  slack: circleci/slack@4.1
+version: 2.1
+workflows:
+  build_test_store_artifacts:
+    jobs:
+      - build:
+          context: gcr
+  nightly:
+    jobs:
+      - build:
+          context: gcr
+          update_modules: true
+    triggers:
+      - schedule:
+          cron: 25 2 * * *
+          filters:
+            branches:
+              only: master
+  version: 2
