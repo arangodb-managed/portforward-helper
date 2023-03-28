@@ -52,8 +52,8 @@ type Config struct {
 
 // PortForwarderClient allows the remote service to bypass the client firewall by using long-running connection
 type PortForwarderClient interface {
-	// Open initiates the connection to remote service
-	Open(ctx context.Context)
+	// Open initiates the connection to remote service.	readyChan will be closed on successful connection upgrade.
+	Open(ctx context.Context, readyChan chan struct{})
 	// Close terminates the connection
 	Close() error
 }
@@ -100,8 +100,8 @@ func New(log zerolog.Logger, cfg *Config) (PortForwarderClient, error) {
 	return c, nil
 }
 
-func (c *portForwardClientImpl) Open(ctx context.Context) {
-	err := c.connectToRemote(ctx)
+func (c *portForwardClientImpl) Open(ctx context.Context, readyChan chan struct{}) {
+	err := c.connectToRemote(ctx, readyChan)
 	if err != nil {
 		c.log.Debug().Err(err).Msg("Port forward finished or errored")
 	}
@@ -115,9 +115,7 @@ func (c *portForwardClientImpl) Close() error {
 	return nil
 }
 
-// connectToRemote formats and executes a port forwarding request. The connection will remain
-// open until stopChan is closed.
-func (c *portForwardClientImpl) connectToRemote(ctx context.Context) error {
+func (c *portForwardClientImpl) connectToRemote(ctx context.Context, readyChan chan struct{}) error {
 	var err error
 	c.streamConn, _, err = c.dialer.Dial(api.ProtocolName)
 	if err != nil {
@@ -128,8 +126,9 @@ func (c *portForwardClientImpl) connectToRemote(ctx context.Context) error {
 		c.streamConn = nil
 	}()
 
-	const streamCreationTimeout = 30 * time.Second
+	close(readyChan)
 
+	const streamCreationTimeout = 30 * time.Second
 	h := &httpStreamHandler{
 		log:                   c.log,
 		conn:                  c.streamConn,
