@@ -48,6 +48,8 @@ type Config struct {
 	ForwardAddr string
 	// ForwardPort is the number of port which will receive the data stream from remote service
 	ForwardPort int
+	// RequestDecorator allows to modify the request before it is sent to the Port Forwarder
+	RequestDecorator func(req *http.Request)
 }
 
 // PortForwarderClient allows the remote service to bypass the client firewall by using long-running connection
@@ -63,10 +65,11 @@ type portForwardClientImpl struct {
 	stopChan chan struct{}
 	streams  chan httpstream.Stream
 
-	forwardAddr string
-	forwardPort int
-	dialer      httpstream.Dialer
-	streamConn  httpstream.Connection
+	requestDecorator func(req *http.Request)
+	forwardAddr      string
+	forwardPort      int
+	dialer           httpstream.Dialer
+	streamConn       httpstream.Connection
 }
 
 // New creates PortForwarderClient
@@ -85,11 +88,12 @@ func New(log zerolog.Logger, cfg *Config) (PortForwarderClient, error) {
 		cfg.ForwardAddr = "127.0.0.1"
 	}
 	c := &portForwardClientImpl{
-		log:         log,
-		stopChan:    make(chan struct{}, 1),
-		forwardAddr: cfg.ForwardAddr,
-		forwardPort: cfg.ForwardPort,
-		streams:     make(chan httpstream.Stream, 1),
+		log:              log,
+		stopChan:         make(chan struct{}, 1),
+		forwardAddr:      cfg.ForwardAddr,
+		forwardPort:      cfg.ForwardPort,
+		requestDecorator: cfg.RequestDecorator,
+		streams:          make(chan httpstream.Stream, 1),
 	}
 	transport, upgrader, err := rt.RoundTripperFor(log, getNewStreamHandler(c.streams))
 	if err != nil {
@@ -117,7 +121,7 @@ func (c *portForwardClientImpl) Close() error {
 
 func (c *portForwardClientImpl) connectToRemote(ctx context.Context, readyChan chan struct{}) error {
 	var err error
-	c.streamConn, _, err = c.dialer.Dial(api.ProtocolName)
+	c.streamConn, _, err = c.dialer.Dial(c.requestDecorator, api.ProtocolName)
 	if err != nil {
 		return fmt.Errorf("error upgrading connection: %s", err)
 	}

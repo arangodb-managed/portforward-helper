@@ -77,10 +77,13 @@ func NewDialer(upgrader Upgrader, client *http.Client, method string, url *url.U
 	}
 }
 
-func (d *dialer) Dial(protocols ...string) (httpstream.Connection, string, error) {
+func (d *dialer) Dial(requestDecorator func(r *http.Request), protocols ...string) (httpstream.Connection, string, error) {
 	req, err := http.NewRequest(d.method, d.url.String(), nil)
 	if err != nil {
 		return nil, "", fmt.Errorf("error creating request: %v", err)
+	}
+	if requestDecorator != nil {
+		requestDecorator(req)
 	}
 	return negotiate(d.upgrader, d.client, req, protocols...)
 }
