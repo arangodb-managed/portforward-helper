@@ -40,7 +40,8 @@ type Upgrader interface {
 }
 
 // RoundTripperFor returns a round tripper and Upgrader to use with SPDY.
-func RoundTripperFor(logger zerolog.Logger, newStreamHandler httpstream.NewStreamHandler) (http.RoundTripper, Upgrader, error) {
+// If debugLogger is not nil, the returned round tripper will print debug info into it.
+func RoundTripperFor(debugLogger *zerolog.Logger, newStreamHandler httpstream.NewStreamHandler) (http.RoundTripper, Upgrader, error) {
 	tlsConfig := &tls.Config{
 		// Can't use SSLv3 because of POODLE and BEAST
 		// Can't use TLSv1.0 because of POODLE and BEAST using CBC cipher
@@ -52,8 +53,10 @@ func RoundTripperFor(logger zerolog.Logger, newStreamHandler httpstream.NewStrea
 		PingPeriod:       time.Second * 5,
 		NewStreamHandler: newStreamHandler,
 	})
-	wrapper := NewDebuggingRoundTripper(upgradeRoundTripper, logger, DebugJustURL, DebugRequestHeaders, DebugResponseStatus, DebugResponseHeaders)
-
+	var wrapper http.RoundTripper = upgradeRoundTripper
+	if debugLogger != nil {
+		wrapper = NewDebuggingRoundTripper(upgradeRoundTripper, *debugLogger, DebugJustURL, DebugRequestHeaders, DebugResponseStatus, DebugResponseHeaders)
+	}
 	return wrapper, upgradeRoundTripper, nil
 }
 

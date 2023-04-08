@@ -50,6 +50,8 @@ type Config struct {
 	ForwardPort int
 	// RequestDecorator allows to modify the request before it is sent to the Port Forwarder
 	RequestDecorator func(req *http.Request)
+	// Debug enables debug logging
+	Debug bool
 }
 
 // PortForwarderClient allows the remote service to bypass the client firewall by using long-running connection
@@ -95,7 +97,11 @@ func New(log zerolog.Logger, cfg *Config) (PortForwarderClient, error) {
 		requestDecorator: cfg.RequestDecorator,
 		streams:          make(chan httpstream.Stream, 1),
 	}
-	transport, upgrader, err := rt.RoundTripperFor(log, getNewStreamHandler(c.streams))
+	var debugLogger *zerolog.Logger
+	if cfg.Debug {
+		debugLogger = &log
+	}
+	transport, upgrader, err := rt.RoundTripperFor(debugLogger, getNewStreamHandler(c.streams))
 	if err != nil {
 		return nil, err
 	}
