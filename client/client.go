@@ -70,11 +70,12 @@ type portForwardClientImpl struct {
 	stopChan chan struct{}
 	streams  chan httpstream.Stream
 
-	requestDecorator func(req *http.Request)
-	forwardAddr      string
-	forwardPort      int
-	dialer           httpstream.Dialer
-	streamConn       httpstream.Connection
+	requestDecorator        func(req *http.Request)
+	forwardAddr             string
+	forwardPort             int
+	dialer                  httpstream.Dialer
+	streamConn              httpstream.Connection
+	lastSuccessfulConnectAt time.Time
 }
 
 // New creates PortForwarderClient
@@ -115,12 +116,25 @@ func New(log zerolog.Logger, cfg *Config) (PortForwarderClient, error) {
 
 func (c *portForwardClientImpl) StartForwarding(ctx context.Context, minRetryInterval, maxRetryInterval time.Duration) {
 	retryIn := minRetryInterval
+	attempt := 1
 	for {
 		err := c.connectToRemote(ctx)
-		if err != nil {
-			c.log.Debug().Err(err).Msgf("Could not connect to remote or connection failed. Retrying in %s", retryIn)
-		}
+		c.log.Debug().Err(err).Msg("Connection interrupted")
 
+		if time.Since(c.lastSuccessfulConnectAt) < minRetryInterval {
+			// reset retry interval
+			retryIn = minRetryInterval
+		} else if attempt != 1 {
+			retryIn *= 2
+			if retryIn > maxRetryInterval {
+				retryIn = maxRetryInterval
+			}
+		}
+		lastSuccessAt := "<never>"
+		if !c.lastSuccessfulConnectAt.IsZero() {
+			lastSuccessAt = c.lastSuccessfulConnectAt.String()
+		}
+		c.log.Debug().Msgf("Retrying connection in %s (attempt %d, last success at %s)", retryIn, attempt, lastSuccessAt)
 		t := time.NewTimer(retryIn)
 		select {
 		case <-ctx.Done():
@@ -133,12 +147,8 @@ func (c *portForwardClientImpl) StartForwarding(ctx context.Context, minRetryInt
 			c.log.Debug().Msg("Forwarding stopped")
 			return
 		case <-t.C:
-			// retry:
-		}
-
-		retryIn *= 2
-		if retryIn > maxRetryInterval {
-			retryIn = maxRetryInterval
+			// retry
+			attempt++
 		}
 	}
 }
@@ -167,6 +177,7 @@ func (c *portForwardClientImpl) connectToRemote(ctx context.Context) error {
 		c.streamConn.Close()
 		c.streamConn = nil
 	}()
+	c.lastSuccessfulConnectAt = time.Now()
 
 	const streamCreationTimeout = 30 * time.Second
 	h := &httpStreamHandler{
