@@ -48,12 +48,19 @@ type Config struct {
 	ForwardAddr string
 	// ForwardPort is the number of port which will receive the data stream from remote service
 	ForwardPort int
+	// RequestDecorator allows to modify the request before it is sent to the Port Forwarder
+	RequestDecorator func(req *http.Request)
+	// Debug enables debug logging
+	Debug bool
 }
 
 // PortForwarderClient allows the remote service to bypass the client firewall by using long-running connection
 type PortForwarderClient interface {
-	// Open initiates the connection to remote service
-	Open(ctx context.Context)
+	// StartForwarding starts a goroutine which initiates the connection to remote service.
+	//It will try to re-connect in case of failure.
+	StartForwarding(ctx context.Context, minRetryInterval, maxRetryInterval time.Duration)
+	// Ready returns true if client currently has an active forwarding connection
+	Ready() bool
 	// Close terminates the connection
 	Close() error
 }
@@ -63,10 +70,12 @@ type portForwardClientImpl struct {
 	stopChan chan struct{}
 	streams  chan httpstream.Stream
 
-	forwardAddr string
-	forwardPort int
-	dialer      httpstream.Dialer
-	streamConn  httpstream.Connection
+	requestDecorator        func(req *http.Request)
+	forwardAddr             string
+	forwardPort             int
+	dialer                  httpstream.Dialer
+	streamConn              httpstream.Connection
+	lastSuccessfulConnectAt time.Time
 }
 
 // New creates PortForwarderClient
@@ -85,13 +94,18 @@ func New(log zerolog.Logger, cfg *Config) (PortForwarderClient, error) {
 		cfg.ForwardAddr = "127.0.0.1"
 	}
 	c := &portForwardClientImpl{
-		log:         log,
-		stopChan:    make(chan struct{}, 1),
-		forwardAddr: cfg.ForwardAddr,
-		forwardPort: cfg.ForwardPort,
-		streams:     make(chan httpstream.Stream, 1),
+		log:              log,
+		stopChan:         make(chan struct{}, 1),
+		forwardAddr:      cfg.ForwardAddr,
+		forwardPort:      cfg.ForwardPort,
+		requestDecorator: cfg.RequestDecorator,
+		streams:          make(chan httpstream.Stream, 1),
 	}
-	transport, upgrader, err := rt.RoundTripperFor(log, getNewStreamHandler(c.streams))
+	var debugLogger *zerolog.Logger
+	if cfg.Debug {
+		debugLogger = &log
+	}
+	transport, upgrader, err := rt.RoundTripperFor(debugLogger, getNewStreamHandler(c.streams))
 	if err != nil {
 		return nil, err
 	}
@@ -100,26 +114,62 @@ func New(log zerolog.Logger, cfg *Config) (PortForwarderClient, error) {
 	return c, nil
 }
 
-func (c *portForwardClientImpl) Open(ctx context.Context) {
-	err := c.connectToRemote(ctx)
-	if err != nil {
-		c.log.Debug().Err(err).Msg("Port forward finished or errored")
+func (c *portForwardClientImpl) StartForwarding(ctx context.Context, minRetryInterval, maxRetryInterval time.Duration) {
+	retryIn := minRetryInterval
+	attempt := 1
+	for {
+		err := c.connectToRemote(ctx)
+		c.log.Debug().Err(err).Msg("Connection interrupted")
+
+		if time.Since(c.lastSuccessfulConnectAt) < minRetryInterval {
+			// reset retry interval
+			retryIn = minRetryInterval
+		} else if attempt != 1 {
+			retryIn *= 2
+			if retryIn > maxRetryInterval {
+				retryIn = maxRetryInterval
+			}
+		}
+		lastSuccessAt := "<never>"
+		if !c.lastSuccessfulConnectAt.IsZero() {
+			lastSuccessAt = c.lastSuccessfulConnectAt.String()
+		}
+		c.log.Debug().Msgf("Retrying connection in %s (attempt %d, last success at %s)", retryIn, attempt, lastSuccessAt)
+		t := time.NewTimer(retryIn)
+		select {
+		case <-ctx.Done():
+			if !t.Stop() {
+				<-t.C
+			}
+			c.log.Debug().Err(err).Msg("Context finished")
+			return
+		case <-c.stopChan:
+			c.log.Debug().Msg("Forwarding stopped")
+			return
+		case <-t.C:
+			// retry
+			attempt++
+		}
 	}
+}
+
+func (c *portForwardClientImpl) Ready() bool {
+	return c.streamConn != nil
 }
 
 func (c *portForwardClientImpl) Close() error {
 	c.stopChan <- struct{}{}
 	if c.streamConn != nil {
-		return c.streamConn.Close()
+		err := c.streamConn.Close()
+		c.streamConn = nil
+		return err
 	}
 	return nil
 }
 
-// connectToRemote formats and executes a port forwarding request. The connection will remain
-// open until stopChan is closed.
 func (c *portForwardClientImpl) connectToRemote(ctx context.Context) error {
 	var err error
-	c.streamConn, _, err = c.dialer.Dial(api.ProtocolName)
+	c.streamConn, _, err = c.dialer.Dial(c.requestDecorator, api.ProtocolName)
 	if err != nil {
 		return fmt.Errorf("error upgrading connection: %s", err)
 	}
@@ -127,9 +177,9 @@ func (c *portForwardClientImpl) connectToRemote(ctx context.Context) error {
 		c.streamConn.Close()
 		c.streamConn = nil
 	}()
+	c.lastSuccessfulConnectAt = time.Now()
 
 	const streamCreationTimeout = 30 * time.Second
-
 	h := &httpStreamHandler{
 		log:                   c.log,
 		conn:                  c.streamConn,
@@ -181,15 +231,20 @@ func (c *portForwardClientImpl) CopyToStream(ctx context.Context, stream httpstr
 	// 0.5s is the default timeout used in socat
 	// https://linux.die.net/man/1/socat
 	timeout := time.Duration(500) * time.Millisecond
+
+	t := time.NewTimer(timeout)
 	select {
 	case e := <-errCh:
 		if errFwd == nil {
 			errFwd = e
 		}
 		c.log.Debug().Err(err).Msg("PortForward stopped forwarding in both directions")
-	case <-time.After(timeout):
+	case <-t.C:
 		c.log.Debug().Msg("PortForward timed out waiting to close the connection")
 	case <-ctx.Done():
+		if !t.Stop() {
+			<-t.C
+		}
 		c.log.Debug().Err(err).Msg("PortForward cancelled")
 		errFwd = ctx.Err()
 	}

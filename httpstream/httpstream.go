@@ -49,7 +49,8 @@ type Dialer interface {
 
 	// Dial opens a streaming connection to a server using one of the protocols
 	// specified (in order of most preferred to least preferred).
-	Dial(protocols ...string) (Connection, string, error)
+	// requestDecorator will be called for each request that is sent to the server.
+	Dial(requestDecorator func(r *http.Request), protocols ...string) (Connection, string, error)
 }
 
 // UpgradeRoundTripper is a type of http.RoundTripper that is able to upgrade

@@ -139,7 +139,7 @@ Loop:
 	for {
 		select {
 		case <-h.conn.CloseChan():
-			h.log.Debug().Msg("Connection upgraded connection closed")
+			h.log.Debug().Msg("Upgraded connection closed")
 			break Loop
 		case stream := <-h.streamChan:
 			requestID := stream.Headers().Get(api.HeaderRequestID)
