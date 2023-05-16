@@ -106,13 +106,13 @@ func TestGetStream(t *testing.T) {
 	// test adding a new entry
 	p, created := h.getStream("1")
 	if p == nil {
-		t.Fatalf("unexpected nil")
+		t.Fatal("unexpected nil")
 	}
 	if !created {
 		t.Fatal("expected created=true")
 	}
 	if p.dataStream != nil {
-		t.Errorf("unexpected non-nil data stream")
+		t.Error("unexpected non-nil data stream")
 	}
 
 	// start the monitor for this stream
@@ -143,14 +143,14 @@ func TestGetStream(t *testing.T) {
 		t.Fatalf("unexpected error adding data stream: %v", err)
 	}
 	if !complete {
-		t.Fatalf("expected complete=true")
+		t.Fatal("expected complete=true")
 	}
 
 	// make sure monitorStream completed
 	<-monitorDone
 
 	if !conn.removeStreamsCalled {
-		t.Fatalf("connection remove stream not called")
+		t.Fatal("connection remove stream not called")
 	}
 	conn.removeStreamsCalled = false
 
@@ -181,7 +181,7 @@ func TestGetStream(t *testing.T) {
 		t.Fatal("expected stream to be removed")
 	}
 	if !conn.removeStreamsCalled {
-		t.Fatalf("connection remove stream not called")
+		t.Fatal("connection remove stream not called")
 	}
 }
 
