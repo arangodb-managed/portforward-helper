@@ -28,8 +28,7 @@ const (
 	HeaderStreamType = "streamType"
 )
 const (
-	StreamTypeData  = "data"
-	StreamTypeError = "error"
+	StreamTypeData = "data"
 )
 
 // ProtocolName is the subprotocol used for port forwarding.

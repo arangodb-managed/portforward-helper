@@ -45,14 +45,6 @@ func TestHTTPStreamReceived(t *testing.T) {
 			expectedError: `"requestID" header is required`,
 			streamType:    "data",
 		},
-		"valid port with error stream": {
-			streamType: "error",
-			requestID:  "42",
-		},
-		"valid port with data stream": {
-			streamType: "data",
-			requestID:  "42",
-		},
 		"invalid stream type": {
 			streamType:    "foo",
 			requestID:     "42",
@@ -101,20 +93,20 @@ func (*fakeConn) CloseChan() <-chan bool                                      { 
 func (*fakeConn) SetIdleTimeout(timeout time.Duration)                        {}
 func (f *fakeConn) RemoveStreams(streams ...httpstream.Stream)                { f.removeStreamsCalled = true }
 
-func TestGetStreamPair(t *testing.T) {
+func TestGetStream(t *testing.T) {
 	timeout := make(chan time.Time)
 
 	conn := &fakeConn{}
 	h := &httpStreamHandler{
-		log:         zerolog.New(zerolog.NewTestWriter(t)),
-		streamPairs: make(map[string]*httpStreamPair),
-		conn:        conn,
+		log:     zerolog.New(zerolog.NewTestWriter(t)),
+		streams: make(map[string]*httpStream),
+		conn:    conn,
 	}
 
 	// test adding a new entry
-	p, created := h.getStreamPair("1")
+	p, created := h.getStream("1")
 	if p == nil {
-		t.Fatalf("unexpected nil pair")
+		t.Fatalf("unexpected nil")
 	}
 	if !created {
 		t.Fatal("expected created=true")
@@ -122,28 +114,25 @@ func TestGetStreamPair(t *testing.T) {
 	if p.dataStream != nil {
 		t.Errorf("unexpected non-nil data stream")
 	}
-	if p.errorStream != nil {
-		t.Errorf("unexpected non-nil error stream")
-	}
 
-	// start the monitor for this pair
+	// start the monitor for this stream
 	monitorDone := make(chan struct{})
 	go func() {
-		h.monitorStreamPair(p, timeout)
+		h.monitorStream(p, timeout)
 		close(monitorDone)
 	}()
 
-	if !h.hasStreamPair("1") {
+	if !h.hasStream("1") {
 		t.Fatal("This should still be true")
 	}
 
 	// make sure we can retrieve an existing entry
-	p2, created := h.getStreamPair("1")
+	p2, created := h.getStream("1")
 	if created {
 		t.Fatal("expected created=false")
 	}
 	if p != p2 {
-		t.Fatalf("retrieving an existing pair: expected %#v, got %#v", p, p2)
+		t.Fatalf("retrieving an existing stream: expected %#v, got %#v", p, p2)
 	}
 
 	// removed via complete
@@ -151,23 +140,13 @@ func TestGetStreamPair(t *testing.T) {
 	dataStream.headers.Set(api.HeaderStreamType, api.StreamTypeData)
 	complete, err := p.add(dataStream)
 	if err != nil {
-		t.Fatalf("unexpected error adding data stream to pair: %v", err)
-	}
-	if complete {
-		t.Fatalf("unexpected complete")
-	}
-
-	errorStream := newFakeHTTPStream()
-	errorStream.headers.Set(api.HeaderStreamType, api.StreamTypeError)
-	complete, err = p.add(errorStream)
-	if err != nil {
-		t.Fatalf("unexpected error adding error stream to pair: %v", err)
+		t.Fatalf("unexpected error adding data stream: %v", err)
 	}
 	if !complete {
-		t.Fatal("unexpected incomplete")
+		t.Fatalf("expected complete=true")
 	}
 
-	// make sure monitorStreamPair completed
+	// make sure monitorStream completed
 	<-monitorDone
 
 	if !conn.removeStreamsCalled {
@@ -175,13 +154,13 @@ func TestGetStreamPair(t *testing.T) {
 	}
 	conn.removeStreamsCalled = false
 
-	// make sure the pair was removed
-	if h.hasStreamPair("1") {
-		t.Fatal("expected removal of pair after both data and error streams received")
+	// make sure the stream was removed
+	if h.hasStream("1") {
+		t.Fatal("expected removal of stream after data stream received")
 	}
 
 	// removed via timeout
-	p, created = h.getStreamPair("2")
+	p, created = h.getStream("2")
 	if !created {
 		t.Fatal("expected created=true")
 	}
@@ -191,15 +170,15 @@ func TestGetStreamPair(t *testing.T) {
 
 	monitorDone = make(chan struct{})
 	go func() {
-		h.monitorStreamPair(p, timeout)
+		h.monitorStream(p, timeout)
 		close(monitorDone)
 	}()
 	// cause the timeout
 	close(timeout)
-	// make sure monitorStreamPair completed
+	// make sure monitorStream completed
 	<-monitorDone
-	if h.hasStreamPair("2") {
-		t.Fatal("expected stream pair to be removed")
+	if h.hasStream("2") {
+		t.Fatal("expected stream to be removed")
 	}
 	if !conn.removeStreamsCalled {
 		t.Fatalf("connection remove stream not called")

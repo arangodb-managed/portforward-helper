@@ -23,8 +23,6 @@ package client
 import (
 	"context"
 	"fmt"
-	"io"
-	"os"
 	"sync"
 	"time"
 
@@ -44,7 +42,7 @@ func getNewStreamHandler(streams chan httpstream.Stream) func(httpstream.Stream,
 		if stream.Headers().Get(api.HeaderRequestID) == "" {
 			return fmt.Errorf("%q header is required", api.HeaderRequestID)
 		}
-		if streamType != api.StreamTypeData && streamType != api.StreamTypeError {
+		if streamType != api.StreamTypeData {
 			return fmt.Errorf("invalid stream type %q", streamType)
 		}
 
@@ -63,8 +61,8 @@ type httpStreamHandler struct {
 	log                   zerolog.Logger
 	conn                  httpstream.Connection
 	streamChan            chan httpstream.Stream
-	streamPairsLock       sync.RWMutex
-	streamPairs           map[string]*httpStreamPair
+	streamsLock           sync.RWMutex
+	streams               map[string]*httpStream
 	streamCreationTimeout time.Duration
 	dataForwarder         dataForwarder
 }
@@ -73,65 +71,62 @@ func (h *httpStreamHandler) handleStreamingError(err error) {
 	h.log.Info().Err(err).Msg("streaming error")
 }
 
-// getStreamPair returns a httpStreamPair for requestID. This creates a
-// new pair if one does not yet exist for the requestID. The returned bool is
-// true if the pair was created.
-func (h *httpStreamHandler) getStreamPair(requestID string) (*httpStreamPair, bool) {
-	h.streamPairsLock.Lock()
-	defer h.streamPairsLock.Unlock()
+// getStream returns a httpStream for requestID. The returned bool is
+// true if the httpStream was created.
+func (h *httpStreamHandler) getStream(requestID string) (*httpStream, bool) {
+	h.streamsLock.Lock()
+	defer h.streamsLock.Unlock()
 
-	if p, ok := h.streamPairs[requestID]; ok {
-		h.log.Debug().Str("request_id", requestID).Msg("Connection request found existing stream pair")
+	if p, ok := h.streams[requestID]; ok {
+		h.log.Debug().Str("request_id", requestID).Msg("Connection request found existing stream")
 		return p, false
 	}
 
-	h.log.Debug().Str("request_id", requestID).Msg("Connection request request creating new stream pair")
+	h.log.Debug().Str("request_id", requestID).Msg("Connection request request creating new stream")
 
-	p := newPortForwardPair(requestID)
-	h.streamPairs[requestID] = p
+	p := newPortForwardStream(requestID)
+	h.streams[requestID] = p
 
 	return p, true
 }
 
-// monitorStreamPair waits for the pair to receive both its error and data
-// streams, or for the timeout to expire (whichever happens first), and then
-// removes the pair.
-func (h *httpStreamHandler) monitorStreamPair(p *httpStreamPair, timeout <-chan time.Time) {
+// monitorStream waits for the required streams or for the timeout to expire (whichever happens first), and then
+// removes it.
+func (h *httpStreamHandler) monitorStream(p *httpStream, timeout <-chan time.Time) {
 	select {
 	case <-timeout:
-		err := fmt.Errorf("(conn=%v, request=%s) timed out waiting for streams", h.conn, p.requestID)
+		err := fmt.Errorf("(conn=%+v, request=%s) timed out waiting for streams", h.conn, p.requestID)
 		h.handleStreamingError(err)
-		p.printError(err.Error())
 	case <-p.complete:
-		h.log.Debug().Str("request_id", p.requestID).Msg("Connection request successfully received error and data streams")
+		h.log.Debug().Str("request_id", p.requestID).Msg("Connection request successfully received all required streams")
 	}
-	h.removeStreamPair(p.requestID)
+	h.removeStream(p.requestID)
 }
 
-// hasStreamPair returns a bool indicating if a stream pair for requestID
+// hasStream returns a bool indicating if a stream for requestID
 // exists.
-func (h *httpStreamHandler) hasStreamPair(requestID string) bool {
-	h.streamPairsLock.RLock()
-	defer h.streamPairsLock.RUnlock()
+func (h *httpStreamHandler) hasStream(requestID string) bool {
+	h.streamsLock.RLock()
+	defer h.streamsLock.RUnlock()
 
-	_, ok := h.streamPairs[requestID]
+	_, ok := h.streams[requestID]
 	return ok
 }
 
-// removeStreamPair removes the stream pair identified by requestID from streamPairs.
-func (h *httpStreamHandler) removeStreamPair(requestID string) {
-	h.streamPairsLock.Lock()
-	defer h.streamPairsLock.Unlock()
+// removeStream removes the stream identified by requestID from streams.
+func (h *httpStreamHandler) removeStream(requestID string) {
+	h.streamsLock.Lock()
+	defer h.streamsLock.Unlock()
 
 	if h.conn != nil {
-		pair := h.streamPairs[requestID]
-		h.conn.RemoveStreams(pair.dataStream, pair.errorStream)
+		s := h.streams[requestID]
+		h.conn.RemoveStreams(s.dataStream)
 	}
-	delete(h.streamPairs, requestID)
+	delete(h.streams, requestID)
 }
 
 // run is the main loop for the httpStreamHandler. It processes new
-// streams, invoking portForward for each complete stream pair. The loop exits
+// streams, invoking portForward for each complete stream. The loop exits
 // when the httpstream.Connection is closed.
 func (h *httpStreamHandler) run(ctx context.Context) {
 	h.log.Debug().Msg("Connection waiting for port forward streams")
@@ -149,14 +144,13 @@ Loop:
 				Str("stream_type", streamType).
 				Msg("Connection request received")
 
-			p, created := h.getStreamPair(requestID)
+			p, created := h.getStream(requestID)
 			if created {
-				go h.monitorStreamPair(p, time.After(h.streamCreationTimeout))
+				go h.monitorStream(p, time.After(h.streamCreationTimeout))
 			}
 			if complete, err := p.add(stream); err != nil {
 				err = fmt.Errorf("error processing stream for request %s: %v", requestID, err)
 				h.handleStreamingError(err)
-				p.printError(err.Error())
 			} else if complete {
 				go h.portForward(ctx, p)
 			}
@@ -165,17 +159,8 @@ Loop:
 }
 
 // portForward invokes the httpStreamHandler's forwarder.PortForward
-// function for the given stream pair.
-func (h *httpStreamHandler) portForward(ctx context.Context, p *httpStreamPair) {
-	// handle err stream
-	go func() {
-		defer p.errorStream.Close()
-		_, err := io.Copy(os.Stderr, p.errorStream)
-		if err != nil {
-			h.handleStreamingError(err)
-		}
-	}()
-
+// function for the given stream.
+func (h *httpStreamHandler) portForward(ctx context.Context, p *httpStream) {
 	err := h.dataForwarder.CopyToStream(ctx, p.dataStream)
 	if err != nil {
 		h.handleStreamingError(err)

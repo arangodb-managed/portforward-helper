@@ -184,7 +184,7 @@ func (c *portForwardClientImpl) connectToRemote(ctx context.Context) error {
 		log:                   c.log,
 		conn:                  c.streamConn,
 		streamChan:            c.streams,
-		streamPairs:           make(map[string]*httpStreamPair),
+		streams:               make(map[string]*httpStream),
 		streamCreationTimeout: streamCreationTimeout,
 		dataForwarder:         c,
 	}
@@ -194,7 +194,8 @@ func (c *portForwardClientImpl) connectToRemote(ctx context.Context) error {
 
 func (c *portForwardClientImpl) CopyToStream(ctx context.Context, stream httpstream.Stream) error {
 	defer stream.Close()
-	conn, err := net.Dial("tcp4", fmt.Sprintf("%s:%d", c.forwardAddr, c.forwardPort))
+	addr := fmt.Sprintf("%s:%d", c.forwardAddr, c.forwardPort)
+	conn, err := net.Dial("tcp4", addr)
 	if err != nil {
 		err = fmt.Errorf("failed to dial %d: %s", c.forwardPort, err.Error())
 		return err
@@ -204,14 +205,14 @@ func (c *portForwardClientImpl) CopyToStream(ctx context.Context, stream httpstr
 	errCh := make(chan error, 2)
 	// Copy from the forward port connection to the client stream
 	go func() {
-		c.log.Debug().Msgf("PortForward copying data to the client stream")
+		c.log.Debug().Msgf("PortForward copying data from stream %d to client connected at %s", stream.Identifier(), addr)
 		_, err := io.Copy(stream, conn)
 		errCh <- err
 	}()
 
 	// Copy from the client stream to the port connection
 	go func() {
-		c.log.Debug().Msg("PortForward copying data from client stream to forward port")
+		c.log.Debug().Msgf("PortForward copying data from client connection (%s) to stream %d", addr, stream.Identifier())
 		_, err := io.Copy(conn, stream)
 		errCh <- err
 	}()
