@@ -134,7 +134,11 @@ func (c *portForwardClientImpl) StartForwarding(ctx context.Context, minRetryInt
 		if !c.lastSuccessfulConnectAt.IsZero() {
 			lastSuccessAt = c.lastSuccessfulConnectAt.String()
 		}
-		c.log.Debug().Msgf("Retrying connection in %s (attempt %d, last success at %s)", retryIn, attempt, lastSuccessAt)
+		c.log.Debug().
+			Int("attempt", attempt).
+			Str("last-success-at", lastSuccessAt).
+			Dur("retry-in", retryIn).
+			Msg("Retrying connection")
 		t := time.NewTimer(retryIn)
 		select {
 		case <-ctx.Done():
@@ -184,7 +188,7 @@ func (c *portForwardClientImpl) connectToRemote(ctx context.Context) error {
 		log:                   c.log,
 		conn:                  c.streamConn,
 		streamChan:            c.streams,
-		streamPairs:           make(map[string]*httpStreamPair),
+		streams:               make(map[string]*httpStream),
 		streamCreationTimeout: streamCreationTimeout,
 		dataForwarder:         c,
 	}
@@ -194,7 +198,8 @@ func (c *portForwardClientImpl) connectToRemote(ctx context.Context) error {
 
 func (c *portForwardClientImpl) CopyToStream(ctx context.Context, stream httpstream.Stream) error {
 	defer stream.Close()
-	conn, err := net.Dial("tcp4", fmt.Sprintf("%s:%d", c.forwardAddr, c.forwardPort))
+	addr := fmt.Sprintf("%s:%d", c.forwardAddr, c.forwardPort)
+	conn, err := net.Dial("tcp4", addr)
 	if err != nil {
 		err = fmt.Errorf("failed to dial %d: %s", c.forwardPort, err.Error())
 		return err
@@ -204,14 +209,20 @@ func (c *portForwardClientImpl) CopyToStream(ctx context.Context, stream httpstr
 	errCh := make(chan error, 2)
 	// Copy from the forward port connection to the client stream
 	go func() {
-		c.log.Debug().Msgf("PortForward copying data to the client stream")
+		c.log.Debug().
+			Uint32("stream-id", stream.Identifier()).
+			Str("address", addr).
+			Msg("PortForward copying data from client to stream")
 		_, err := io.Copy(stream, conn)
 		errCh <- err
 	}()
 
 	// Copy from the client stream to the port connection
 	go func() {
-		c.log.Debug().Msg("PortForward copying data from client stream to forward port")
+		c.log.Debug().
+			Uint32("stream-id", stream.Identifier()).
+			Str("address", addr).
+			Msg("PortForward copying data from stream to client")
 		_, err := io.Copy(conn, stream)
 		errCh <- err
 	}()
