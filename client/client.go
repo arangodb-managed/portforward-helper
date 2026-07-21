@@ -27,6 +27,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -198,7 +199,7 @@ func (c *portForwardClientImpl) connectToRemote(ctx context.Context) error {
 
 func (c *portForwardClientImpl) CopyToStream(ctx context.Context, stream httpstream.Stream) error {
 	defer stream.Close()
-	addr := fmt.Sprintf("%s:%d", c.forwardAddr, c.forwardPort)
+	addr := net.JoinHostPort(c.forwardAddr, strconv.Itoa(c.forwardPort))
 	conn, err := net.Dial("tcp4", addr)
 	if err != nil {
 		err = fmt.Errorf("failed to dial %d: %s", c.forwardPort, err.Error())
